@@ -1,0 +1,8 @@
+.* export-ignore
+*.dist export-ignore
+*.dist.php export-ignore
+*.md export-ignore
+tests/ export-ignore
+phpunit.xml export-ignore
+phpstan.neon export-ignore
+pint.json export-ignore
