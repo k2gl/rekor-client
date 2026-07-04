@@ -1,0 +1,100 @@
+name: Attest
+
+on:
+  push:
+    tags: ['[0-9]*.[0-9]*.[0-9]*']
+
+permissions:
+  contents: read
+
+jobs:
+  attest:
+    name: Build provenance
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      attestations: write
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Build release tarball
+        run: |
+          tarball="rekor-client-${GITHUB_REF_NAME}.tar.gz"
+          git archive --format=tar.gz --prefix="rekor-client-${GITHUB_REF_NAME}/" --output="${tarball}" "${GITHUB_SHA}"
+          echo "tarball=${tarball}" >> "$GITHUB_ENV"
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: ${{ env.tarball }}
+
+      - name: Download attestation bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh attestation download "${tarball}" --repo "${GITHUB_REPOSITORY}"
+          mv sha256:*.jsonl "${tarball}.sigstore.jsonl"
+
+      - name: Hand off signed artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: signed-release
+          path: |
+            *.tar.gz
+            *.sigstore.jsonl
+          if-no-files-found: error
+
+  release:
+    name: Publish release assets
+    needs: attest
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Fetch signed artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: signed-release
+
+      - name: Create release with assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --verify-tag \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes \
+            *.tar.gz *.sigstore.jsonl \
+          || gh release upload "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --clobber *.tar.gz *.sigstore.jsonl
+
+  verify:
+    name: Verify published release
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Download release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" \
+            --pattern '*.tar.gz' --pattern '*.sigstore.jsonl'
+
+      - name: Verify attestation (online)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh attestation verify *.tar.gz --repo "${GITHUB_REPOSITORY}"
+
+      - name: Verify attestation (offline bundle)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh attestation verify *.tar.gz --repo "${GITHUB_REPOSITORY}" --bundle *.sigstore.jsonl
