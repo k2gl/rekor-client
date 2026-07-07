@@ -115,34 +115,50 @@ final class RekorClientTest extends TestCase
 
     public function testTransportErrorThrowsRequestException(): void
     {
+        // arrange
         $client = $this->client(function (): ResponseInterface {
             throw new class ('down') extends RuntimeException implements ClientExceptionInterface {};
         });
 
-        $this->expectException(RekorRequestException::class);
-        $client->submitHashedRekord('d', 's', Verifier::publicKey('k', KeyDetails::PKIX_ECDSA_P256_SHA_256));
+        // act + assert
+        fact(static fn () => $client->submitHashedRekord(
+            'd',
+            's',
+            Verifier::publicKey('k', KeyDetails::PKIX_ECDSA_P256_SHA_256),
+        ))->throws(RekorRequestException::class);
     }
 
     public function testNonJsonBodyThrowsResponseException(): void
     {
+        // arrange
         $client = $this->client(fn (): ResponseInterface => $this->response(200, 'not json at all'));
 
-        $this->expectException(RekorResponseException::class);
-        $client->submitHashedRekord('d', 's', Verifier::publicKey('k', KeyDetails::PKIX_ECDSA_P256_SHA_256));
+        // act + assert
+        fact(static fn () => $client->submitHashedRekord(
+            'd',
+            's',
+            Verifier::publicKey('k', KeyDetails::PKIX_ECDSA_P256_SHA_256),
+        ))->throws(RekorResponseException::class);
     }
 
     public function testMalformedEntryThrowsResponseException(): void
     {
+        // arrange
         $client = $this->client(fn (): ResponseInterface => $this->response(200, '{"logIndex":"5"}'));
 
-        $this->expectException(RekorResponseException::class);
-        $client->submitHashedRekord('d', 's', Verifier::publicKey('k', KeyDetails::PKIX_ECDSA_P256_SHA_256));
+        // act + assert
+        fact(static fn () => $client->submitHashedRekord(
+            'd',
+            's',
+            Verifier::publicKey('k', KeyDetails::PKIX_ECDSA_P256_SHA_256),
+        ))->throws(RekorResponseException::class);
     }
 
     public function testRejectsEmptyVerifierBytes(): void
     {
-        $this->expectException(\K2gl\RekorClient\Exception\InvalidArgumentException::class);
-        Verifier::publicKey('', KeyDetails::PKIX_ECDSA_P256_SHA_256);
+        // act + assert
+        fact(static fn () => Verifier::publicKey('', KeyDetails::PKIX_ECDSA_P256_SHA_256))
+            ->throws(\K2gl\RekorClient\Exception\InvalidArgumentException::class);
     }
 
     /** @param callable(RequestInterface): ResponseInterface $handler */
