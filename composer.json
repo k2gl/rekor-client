@@ -1,6 +1,6 @@
 {
   "name": "k2gl/rekor-client",
-  "description": "A PSR-18 client for the Rekor v2 transparency log — submit entries and read checkpoints in PHP.",
+  "description": "A PSR-18 client for the Rekor v2 transparency log — submit entries and read checkpoints in PHP",
   "homepage": "https://github.com/k2gl/rekor-client",
   "type": "library",
   "license": "MIT",
