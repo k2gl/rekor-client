@@ -1,14 +1,16 @@
-# Rekor v2 client for PHP
+# Rekor client for PHP
 
 [![CI](https://img.shields.io/github/actions/workflow/status/k2gl/rekor-client/ci.yml?branch=main&label=CI&logo=github)](https://github.com/k2gl/rekor-client/actions/workflows/ci.yml)
 [![Latest Stable Version](https://img.shields.io/packagist/v/k2gl/rekor-client?logo=packagist&logoColor=white)](https://packagist.org/packages/k2gl/rekor-client)
 [![PHPStan Level](https://img.shields.io/badge/PHPStan-level%209-2a5ea7?logo=php&logoColor=white)](https://phpstan.org)
 [![License](https://img.shields.io/packagist/l/k2gl/rekor-client?color=yellowgreen)](https://packagist.org/packages/k2gl/rekor-client)
 
-Submit entries to a [Rekor v2](https://github.com/sigstore/rekor-tiles) (rekor-tiles)
-transparency log from PHP and get back the transparency-log entry Rekor integrated —
-the same value [`k2gl/sigstore-bundle`](https://github.com/k2gl/sigstore-bundle) takes,
-so a signer goes **submit → add to bundle** with no glue in between.
+Submit entries to a Rekor transparency log from PHP — both the original
+[v1](https://github.com/sigstore/rekor) REST log and
+[v2](https://github.com/sigstore/rekor-tiles) (rekor-tiles) — and get back the
+transparency-log entry Rekor integrated, the same value
+[`k2gl/sigstore-bundle`](https://github.com/k2gl/sigstore-bundle) takes, so a signer goes
+**submit → add to bundle** with no glue in between.
 
 Transport is any [PSR-18](https://www.php-fig.org/psr/psr-18/) HTTP client you supply
 (Guzzle, Symfony HttpClient, …). This package speaks the Rekor API; it owns no socket.
@@ -28,6 +30,7 @@ composer require k2gl/rekor-client
 ## Usage
 
 ```php
+use K2gl\RekorClient\RekorApiVersion;
 use K2gl\RekorClient\RekorClient;
 use K2gl\RekorClient\Verifier;
 use K2gl\RekorClient\KeyDetails;
@@ -36,7 +39,8 @@ $rekor = new RekorClient(
     httpClient:     $psr18Client,
     requestFactory: $psr17Factory,
     streamFactory:  $psr17Factory,
-    baseUrl:        'https://rekor.sigstore.dev', // the v2 log URL from your signing config
+    baseUrl:        'https://rekor.sigstore.dev',
+    apiVersion:     RekorApiVersion::V1,
 );
 
 // A hashedrekord entry: the artifact digest, the signature, and the key or
@@ -54,9 +58,27 @@ $json = BundleBuilder::forMessageSignature($messageSignature)
     ->toJson();
 ```
 
+### Which log version
+
+Take both the URL and the version from the log entry in Sigstore's **signing config**
+rather than assuming — that is what `majorApiVersion` there is for, and
+`RekorApiVersion::from()` accepts it directly. It matters: Sigstore's default signing
+config still lists only `rekor.sigstore.dev` at major version **1**, and the v2 logs live
+in a separate, opt-in config.
+
+The two differ in more than the path. v1 takes the verifier as PEM and the digest as hex,
+answers with a map keyed by entry UUID, hex-encodes proof hashes, and stamps every entry
+with an integrated time and a signed entry timestamp. v2 takes raw DER and base64, answers
+with the entry itself, and has no per-entry time — a v2 bundle needs an RFC 3161
+timestamp to be verifiable. All of that is handled here; the only choice you make is the
+version.
+
+A v1 submission takes a SHA-256, SHA-384 or SHA-512 digest (hashedrekord `0.0.1` names the
+algorithm, and it is read from the digest length).
+
 ### DSSE attestations
 
-Rekor v2 has no DSSE entry type. Submit the DSSE **PAE** digest and the envelope
+Neither version has a DSSE entry type. Submit the DSSE **PAE** digest and the envelope
 signature as a hashedrekord — the entry Rekor returns is the one a DSSE bundle carries.
 
 ### Signing identity
@@ -75,8 +97,8 @@ with the HTTP `statusCode`), and `InvalidArgumentException` (bad input).
 
 ## Scope
 
-This release covers **submission** (the write path a signer needs) against Rekor v2.
-Reading back entries and tiles (the C2SP tlog-tiles read API) is not implemented yet;
+This package covers **submission** (the write path a signer needs) against both log
+versions. Reading back entries and tiles (the C2SP tlog-tiles read API) is not implemented yet;
 verifying an entry already in a bundle is what
 [`k2gl/sigstore-verify`](https://github.com/k2gl/sigstore-verify) does.
 

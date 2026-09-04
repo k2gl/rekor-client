@@ -99,4 +99,56 @@ final class Json
 
         return $out;
     }
+
+    /**
+     * A lower-case hex string decoded to raw bytes. Rekor v1 hex-encodes what v2
+     * base64-encodes: log ids, root hashes and proof hashes.
+     *
+     * @param array<string, mixed> $data
+     */
+    public static function hex(array $data, string $key): string
+    {
+        $decoded = self::decodeHex(self::string($data, $key));
+
+        if ($decoded === null) {
+            throw new RekorResponseException(sprintf('Field "%s" in the Rekor response is not valid hex.', $key));
+        }
+
+        return $decoded;
+    }
+
+    /**
+     * @param  array<string, mixed> $data
+     * @return list<string>
+     */
+    public static function hexList(array $data, string $key): array
+    {
+        $value = $data[$key] ?? null;
+
+        if (! is_array($value) || ! array_is_list($value)) {
+            throw new RekorResponseException(sprintf('Expected an array at "%s" in the Rekor response.', $key));
+        }
+        $out = [];
+
+        foreach ($value as $item) {
+            $decoded = is_string($item) ? self::decodeHex($item) : null;
+
+            if ($decoded === null) {
+                throw new RekorResponseException(sprintf('An entry in "%s" is not valid hex.', $key));
+            }
+            $out[] = $decoded;
+        }
+
+        return $out;
+    }
+
+    private static function decodeHex(string $value): ?string
+    {
+        if ($value === '' || strlen($value) % 2 !== 0 || ! ctype_xdigit($value)) {
+            return null;
+        }
+        $decoded = hex2bin($value);
+
+        return $decoded === false ? null : $decoded;
+    }
 }
