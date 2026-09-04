@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.1.0
+
+- **Rekor v1 submission.** `RekorClient` now speaks both major versions of the log API,
+  chosen with the new `RekorApiVersion` enum whose case values are the `majorApiVersion`
+  Sigstore publishes per log in the signing config. This matters in practice: the default
+  signing config still lists only `rekor.sigstore.dev` at major version 1, so signing
+  against the public instance was out of reach while only v2 was implemented. Existing
+  callers are unaffected — the constructor argument defaults to v2.
+- v1 differences are handled inside the client: the verifier goes out as PEM and the
+  digest as hex, the response is a map keyed by entry UUID, proof hashes are hex, and the
+  entry carries an integrated time and a signed entry timestamp (the inclusion promise) —
+  so a v1 bundle needs no separate RFC 3161 timestamp to be verifiable.
+- `Verifier::pem()` renders the key or certificate the way v1 wants it.
+
 ## 1.0.0
 
 First public release. A PSR-18 client for the Rekor v2 (rekor-tiles) transparency log.

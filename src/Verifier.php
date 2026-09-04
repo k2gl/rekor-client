@@ -9,7 +9,8 @@ use K2gl\RekorClient\Exception\InvalidArgumentException;
 /**
  * The verifier a hashedrekord entry is bound to: either a bare public key or a
  * Fulcio (keyless) certificate, tagged with the signing algorithm. Exactly the
- * `Verifier` message Rekor v2 expects inside a submission.
+ * `Verifier` message Rekor v2 expects inside a submission; {@see self::pem()}
+ * renders the same key the way Rekor v1 wants it.
  */
 final class Verifier
 {
@@ -49,5 +50,22 @@ final class Verifier
             $this->kind => ['rawBytes' => base64_encode($this->rawBytes)],
             'keyDetails' => $this->keyDetails->value,
         ];
+    }
+
+    /**
+     * The same key or certificate as PEM. Rekor v1's hashedrekord carries the
+     * verifier this way (base64 of the PEM) where v2 takes raw DER, and it does
+     * not tag the algorithm — v1 infers it from the key itself.
+     */
+    public function pem(): string
+    {
+        $label = $this->kind === self::KIND_CERTIFICATE ? 'CERTIFICATE' : 'PUBLIC KEY';
+
+        return sprintf(
+            "-----BEGIN %s-----\n%s-----END %s-----\n",
+            $label,
+            chunk_split(base64_encode($this->rawBytes), 64, "\n"),
+            $label,
+        );
     }
 }
