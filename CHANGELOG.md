@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.2.0
+
+- **Submissions are retried** when the log answers with a transport failure or one of the
+  statuses that mean "busy, come back" (`408`, `429`, `499`, `500`, `502`, `503`, `504`),
+  backing off exponentially with jitter and honouring `Retry-After`. Two extra attempts by
+  default, `retries: 0` to send once. This is not hypothetical: a single `499` from the log
+  ("add entry: await: context canceled") is enough to fail a signing run.
+- **A duplicate entry is no longer just an error.** Rekor v1 answers `409` with a
+  `Location` for the entry that is already logged, and the client now follows it and
+  returns that entry — the case a retry meets when the first attempt reached the log but
+  its answer did not come back. Rekor v2 has no write-side endpoint to read it from, so
+  its `409` is reported with the log index from `x-log-index`.
+
 ## 1.1.0
 
 - **Rekor v1 submission.** `RekorClient` now speaks both major versions of the log API,

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace K2gl\RekorClient;
 
+use Closure;
 use JsonException;
 use K2gl\RekorClient\Exception\InvalidArgumentException;
 use K2gl\RekorClient\Exception\RekorRequestException;
@@ -14,6 +15,7 @@ use K2gl\SigstoreBundle\TransparencyLogEntry;
 use Psr\Http\Client\ClientExceptionInterface;
 use Psr\Http\Client\ClientInterface;
 use Psr\Http\Message\RequestFactoryInterface;
+use Psr\Http\Message\ResponseInterface;
 use Psr\Http\Message\StreamFactoryInterface;
 
 /**
@@ -39,7 +41,27 @@ use Psr\Http\Message\StreamFactoryInterface;
  */
 final class RekorClient
 {
+    /** Extra attempts after the first one. */
+    private const DEFAULT_RETRIES = 2;
+
+    /** Doubles per attempt, so 0.2s, 0.4s, 0.8s … before a cap. */
+    private const BACKOFF_MICROSECONDS = 200_000;
+
+    private const MAX_BACKOFF_MICROSECONDS = 5_000_000;
+
+    /** A log asking to be left alone for longer than this is not worth waiting for. */
+    private const MAX_RETRY_AFTER_SECONDS = 30;
+
+    /**
+     * Statuses worth trying again. A duplicate (409) is deliberately absent: the
+     * entry is already in the log, so a retry would only produce it again.
+     */
+    private const RETRYABLE_STATUSES = [408, 429, 499, 500, 502, 503, 504];
+
     private readonly string $baseUrl;
+
+    /** @var Closure(int): mixed */
+    private readonly Closure $sleeper;
 
     public function __construct(
         private readonly ClientInterface $httpClient,
@@ -47,8 +69,11 @@ final class RekorClient
         private readonly StreamFactoryInterface $streamFactory,
         string $baseUrl,
         private readonly RekorApiVersion $apiVersion = RekorApiVersion::V2,
+        private readonly int $retries = self::DEFAULT_RETRIES,
+        ?Closure $sleeper = null,
     ) {
         $this->baseUrl = rtrim($baseUrl, '/');
+        $this->sleeper = $sleeper ?? usleep(...);
     }
 
     /**
@@ -80,7 +105,24 @@ final class RekorClient
             ],
         ];
 
-        return $this->parseV2Entry($this->post('/api/v2/log/entries', $body));
+        $response = $this->send('/api/v2/log/entries', $body);
+
+        if ($response->getStatusCode() === 409) {
+            // rekor-tiles reports a duplicate as AlreadyExists and names the entry
+            // in x-log-index. There is no write-side endpoint to read it back, so
+            // say where it is and let the caller fetch it from the read path.
+            throw new RekorResponseException(
+                sprintf(
+                    'Rekor already holds this entry%s.',
+                    $response->hasHeader('x-log-index')
+                        ? ' at log index ' . $response->getHeaderLine('x-log-index')
+                        : '',
+                ),
+                statusCode: 409,
+            );
+        }
+
+        return $this->parseV2Entry($this->decode($response));
     }
 
     private function submitV1(string $digest, string $signature, Verifier $verifier): TransparencyLogEntry
@@ -102,7 +144,16 @@ final class RekorClient
             ],
         ];
 
-        return $this->parseV1Entry($this->post('/api/v1/log/entries', $body));
+        $response = $this->send('/api/v1/log/entries', $body);
+
+        // A duplicate is not a failure: the entry is in the log, and Rekor points
+        // at it. This is also what a retry runs into when the first attempt
+        // reached the log but its answer did not reach us.
+        if ($response->getStatusCode() === 409) {
+            $response = $this->fetchExistingV1Entry($response);
+        }
+
+        return $this->parseV1Entry($this->decode($response));
     }
 
     /** The hashedrekord 0.0.1 algorithm name for a digest, by its length. */
@@ -120,29 +171,104 @@ final class RekorClient
     }
 
     /**
-     * POST a JSON body and return the decoded response object.
+     * Send a request, trying again while the log answers with something that is
+     * worth another go — a transport failure, or one of the statuses a log uses
+     * to say "busy, come back". A 409 is returned to the caller rather than
+     * retried; what it means differs per version.
      *
-     * @param  array<string, mixed> $body
+     * @param array<string, mixed>|null $body
+     */
+    private function send(string $path, ?array $body, string $method = 'POST'): ResponseInterface
+    {
+        $request = $this->requestFactory->createRequest($method, $this->baseUrl . $path)
+            ->withHeader('Accept', 'application/json');
+
+        if ($body !== null) {
+            try {
+                $json = json_encode($body, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES);
+            } catch (JsonException $e) {
+                throw new RekorRequestException('Could not encode the Rekor request body: ' . $e->getMessage(), previous: $e);
+            }
+            $request = $request
+                ->withHeader('Content-Type', 'application/json')
+                ->withBody($this->streamFactory->createStream($json));
+        }
+        $attempts = max(1, $this->retries + 1);
+
+        for ($attempt = 1; ; $attempt++) {
+            try {
+                $response = $this->httpClient->sendRequest($request);
+            } catch (ClientExceptionInterface $e) {
+                if ($attempt >= $attempts) {
+                    throw new RekorRequestException('Rekor request failed: ' . $e->getMessage(), previous: $e);
+                }
+                $this->pause($attempt, null);
+
+                continue;
+            }
+
+            if ($attempt >= $attempts || ! in_array($response->getStatusCode(), self::RETRYABLE_STATUSES, true)) {
+                return $response;
+            }
+            $this->pause($attempt, $response);
+        }
+    }
+
+    /** Wait before the next attempt: as long as the log asked, else backing off. */
+    private function pause(int $attempt, ?ResponseInterface $response): void
+    {
+        $asked = $response === null ? null : self::retryAfterSeconds($response);
+
+        if ($asked !== null) {
+            ($this->sleeper)($asked * 1_000_000);
+
+            return;
+        }
+        $backoff = min(self::BACKOFF_MICROSECONDS << ($attempt - 1), self::MAX_BACKOFF_MICROSECONDS);
+
+        // Jitter, so several signers retrying at once do not march in step.
+        ($this->sleeper)($backoff + random_int(0, intdiv($backoff, 2)));
+    }
+
+    /** The Retry-After delay in seconds, when the log sent a usable one. */
+    private static function retryAfterSeconds(ResponseInterface $response): ?int
+    {
+        $header = trim($response->getHeaderLine('Retry-After'));
+
+        if ($header === '' || preg_match('/^\d+$/', $header) !== 1) {
+            return null;
+        }
+        $seconds = (int) $header;
+
+        return $seconds >= 0 && $seconds <= self::MAX_RETRY_AFTER_SECONDS ? $seconds : null;
+    }
+
+    /**
+     * Rekor v1 answers a duplicate with 409 and a Location pointing at the entry
+     * that is already there. Follow it.
+     */
+    private function fetchExistingV1Entry(ResponseInterface $conflict): ResponseInterface
+    {
+        $location = trim($conflict->getHeaderLine('Location'));
+        $uuid = $location === '' ? '' : basename(parse_url($location, PHP_URL_PATH) ?: '');
+
+        if ($uuid === '' || preg_match('/^[0-9a-f]{64,80}$/', $uuid) !== 1) {
+            throw new RekorResponseException(
+                'Rekor reported the entry as already logged but gave no usable Location for it.',
+                statusCode: 409,
+            );
+        }
+
+        return $this->send('/api/v1/log/entries/' . $uuid, null, 'GET');
+    }
+
+    /**
+     * Check the status and decode the JSON body.
+     *
      * @return array<string, mixed>
      */
-    private function post(string $path, array $body): array
+    private function decode(ResponseInterface $response): array
     {
-        try {
-            $json = json_encode($body, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES);
-        } catch (JsonException $e) {
-            throw new RekorRequestException('Could not encode the Rekor request body: ' . $e->getMessage(), previous: $e);
-        }
-
-        $request = $this->requestFactory->createRequest('POST', $this->baseUrl . $path)
-            ->withHeader('Content-Type', 'application/json')
-            ->withHeader('Accept', 'application/json')
-            ->withBody($this->streamFactory->createStream($json));
-
-        try {
-            $response = $this->httpClient->sendRequest($request);
-        } catch (ClientExceptionInterface $e) {
-            throw new RekorRequestException('Rekor request failed: ' . $e->getMessage(), previous: $e);
-        }
         $status = $response->getStatusCode();
         $payload = (string) $response->getBody();
 

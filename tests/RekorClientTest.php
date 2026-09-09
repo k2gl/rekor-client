@@ -340,19 +340,234 @@ final class RekorClientTest extends TestCase
         ))->throws(RekorResponseException::class);
     }
 
-    /** @param callable(RequestInterface): ResponseInterface $handler */
-    private function client(callable $handler, RekorApiVersion $apiVersion = RekorApiVersion::V2): RekorClient
+    public function testRetriesAStatusTheLogUsesToSayBusy(): void
     {
+        // arrange
+        $attempts = 0;
+        $client = $this->client(function () use (&$attempts): ResponseInterface {
+            $attempts++;
+
+            return $attempts < 3
+                ? $this->response(503, '{"message":"reached max pushback; retry"}')
+                : $this->response(201, $this->fixture('rekor-v2-entry-response.json'));
+        });
+
+        // act
+        $entry = $client->submitHashedRekord(str_repeat("\x11", 32), 'sig', Verifier::publicKey('k', KeyDetails::PKIX_ECDSA_P256_SHA_256));
+
+        // assert
+        fact($attempts)->is(3);
+        fact($entry->logIndex)->is(735);
+        fact(count($this->slept))->is(2);
+        fact($this->slept[1] > $this->slept[0])->true();
+    }
+
+    public function testRetriesTheCancellationSeenOnTheRealLog(): void
+    {
+        // arrange: the failure that turned a conformance run red — the log
+        // cancelled the request server-side
+        $attempts = 0;
+        $client = $this->client(function () use (&$attempts): ResponseInterface {
+            $attempts++;
+
+            return $attempts === 1
+                ? $this->response(499, '{"code":1, "message":"add entry: await: context canceled", "details":[]}')
+                : $this->response(201, $this->fixture('rekor-v2-entry-response.json'));
+        });
+
+        // act
+        $entry = $client->submitHashedRekord(str_repeat("\x11", 32), 'sig', Verifier::publicKey('k', KeyDetails::PKIX_ECDSA_P256_SHA_256));
+
+        // assert
+        fact($attempts)->is(2);
+        fact($entry->kind)->is('hashedrekord');
+    }
+
+    public function testRetriesATransportFailure(): void
+    {
+        // arrange
+        $attempts = 0;
+        $client = $this->client(function () use (&$attempts): ResponseInterface {
+            $attempts++;
+
+            if ($attempts === 1) {
+                throw new class ('connection reset') extends RuntimeException implements ClientExceptionInterface {};
+            }
+
+            return $this->response(201, $this->fixture('rekor-v2-entry-response.json'));
+        });
+
+        // act
+        $entry = $client->submitHashedRekord(str_repeat("\x11", 32), 'sig', Verifier::publicKey('k', KeyDetails::PKIX_ECDSA_P256_SHA_256));
+
+        // assert
+        fact($attempts)->is(2);
+        fact($entry->logIndex)->is(735);
+    }
+
+    public function testDoesNotRetryARejectedEntry(): void
+    {
+        // arrange
+        $attempts = 0;
+        $client = $this->client(function () use (&$attempts): ResponseInterface {
+            $attempts++;
+
+            return $this->response(400, '{"message":"invalid entry"}');
+        });
+
+        // act + assert
+        fact(fn () => $client->submitHashedRekord(str_repeat("\x11", 32), 'sig', Verifier::publicKey('k', KeyDetails::PKIX_ECDSA_P256_SHA_256)))
+            ->throws(RekorResponseException::class);
+        fact($attempts)->is(1);
+        fact($this->slept)->is([]);
+    }
+
+    public function testGivesUpAfterTheConfiguredNumberOfAttempts(): void
+    {
+        // arrange
+        $attempts = 0;
+        $client = $this->client(function () use (&$attempts): ResponseInterface {
+            $attempts++;
+
+            return $this->response(503, '');
+        });
+
+        // act + assert
+        fact(fn () => $client->submitHashedRekord(str_repeat("\x11", 32), 'sig', Verifier::publicKey('k', KeyDetails::PKIX_ECDSA_P256_SHA_256)))
+            ->throws(RekorResponseException::class);
+        fact($attempts)->is(3);
+    }
+
+    public function testSendsOnceWhenRetriesAreTurnedOff(): void
+    {
+        // arrange
+        $attempts = 0;
+        $client = $this->client(
+            function () use (&$attempts): ResponseInterface {
+                $attempts++;
+
+                return $this->response(503, '');
+            },
+            retries: 0,
+        );
+
+        // act + assert
+        fact(fn () => $client->submitHashedRekord(str_repeat("\x11", 32), 'sig', Verifier::publicKey('k', KeyDetails::PKIX_ECDSA_P256_SHA_256)))
+            ->throws(RekorResponseException::class);
+        fact($attempts)->is(1);
+    }
+
+    public function testWaitsAsLongAsTheLogAsked(): void
+    {
+        // arrange
+        $attempts = 0;
+        $client = $this->client(function () use (&$attempts): ResponseInterface {
+            $attempts++;
+
+            return $attempts === 1
+                ? $this->response(429, '', ['Retry-After' => '3'])
+                : $this->response(201, $this->fixture('rekor-v2-entry-response.json'));
+        });
+
+        // act
+        $client->submitHashedRekord(str_repeat("\x11", 32), 'sig', Verifier::publicKey('k', KeyDetails::PKIX_ECDSA_P256_SHA_256));
+
+        // assert
+        fact($this->slept)->is([3_000_000]);
+    }
+
+    public function testRekorV1FollowsAConflictToTheEntryAlreadyLogged(): void
+    {
+        // arrange: this is what a retry meets when the first attempt reached the
+        // log but its answer did not come back
+        $uuid = str_repeat('a', 64);
+        $paths = [];
+        $client = $this->client(
+            function (RequestInterface $request) use (&$paths, $uuid): ResponseInterface {
+                $paths[] = $request->getUri()->getPath();
+
+                return count($paths) === 1
+                    ? $this->response(409, '{"message":"entry already exists"}', [
+                        'Location' => '/api/v1/log/entries/' . $uuid,
+                    ])
+                    : $this->response(200, $this->fixture('rekor-v1-entry-response.json'));
+            },
+            RekorApiVersion::V1,
+        );
+
+        // act
+        $entry = $client->submitHashedRekord(str_repeat("\x11", 32), 'sig', Verifier::publicKey('k', KeyDetails::PKIX_ECDSA_P256_SHA_256));
+
+        // assert
+        fact($paths)->is(['/api/v1/log/entries', '/api/v1/log/entries/' . $uuid]);
+        fact($entry->logIndex)->is(120000000);
+    }
+
+    public function testRekorV1ConflictWithoutAUsableLocationIsReported(): void
+    {
+        // arrange
+        $client = $this->client(
+            fn (): ResponseInterface => $this->response(409, '{"message":"entry already exists"}'),
+            RekorApiVersion::V1,
+        );
+
+        // act + assert
+        fact(fn () => $client->submitHashedRekord(str_repeat("\x11", 32), 'sig', Verifier::publicKey('k', KeyDetails::PKIX_ECDSA_P256_SHA_256)))
+            ->throws(RekorResponseException::class, 'no usable Location');
+    }
+
+    public function testRekorV2ConflictNamesTheEntryAlreadyLogged(): void
+    {
+        // arrange
+        $client = $this->client(fn (): ResponseInterface => $this->response(
+            409,
+            '{"message":"entry already exists"}',
+            ['x-log-index' => '4242'],
+        ));
+
+        // act + assert
+        fact(fn () => $client->submitHashedRekord(str_repeat("\x11", 32), 'sig', Verifier::publicKey('k', KeyDetails::PKIX_ECDSA_P256_SHA_256)))
+            ->throws(RekorResponseException::class, 'log index 4242');
+    }
+
+    /** Microsecond delays the client asked for, newest last. @var list<int> */
+    private array $slept = [];
+
+    /** @param callable(RequestInterface): ResponseInterface $handler */
+    private function client(
+        callable $handler,
+        RekorApiVersion $apiVersion = RekorApiVersion::V2,
+        int $retries = 2,
+    ): RekorClient {
         $psr17 = new Psr17Factory;
         $http = $this->createMock(ClientInterface::class);
         $http->method('sendRequest')->willReturnCallback($handler);
+        $this->slept = [];
 
-        return new RekorClient($http, $psr17, $psr17, self::BASE_URL, $apiVersion);
+        return new RekorClient(
+            $http,
+            $psr17,
+            $psr17,
+            self::BASE_URL,
+            $apiVersion,
+            $retries,
+            function (int $microseconds): void {
+                $this->slept[] = $microseconds;
+            },
+        );
     }
 
-    private function response(int $status, string $body): ResponseInterface
+    /** @param array<string, string> $headers */
+    private function response(int $status, string $body, array $headers = []): ResponseInterface
     {
-        return (new Psr17Factory)->createResponse($status)->withBody((new Psr17Factory)->createStream($body));
+        $response = (new Psr17Factory)->createResponse($status)
+            ->withBody((new Psr17Factory)->createStream($body));
+
+        foreach ($headers as $name => $value) {
+            $response = $response->withHeader($name, $value);
+        }
+
+        return $response;
     }
 
     private function fixture(string $name): string
