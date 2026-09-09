@@ -88,6 +88,22 @@ signature as a hashedrekord — the entry Rekor returns is the one a DSSE bundle
 
 `KeyDetails` names the algorithm (`PKIX_ECDSA_P256_SHA_256`, `PKIX_ED25519`, …).
 
+### Retries and duplicates
+
+A submission is tried again when the log answers with something that means "busy, come
+back" — a transport failure, or `408`, `429`, `499`, `500`, `502`, `503`, `504` — backing
+off exponentially with jitter, and waiting exactly as long as a `Retry-After` header asks.
+Two extra attempts by default; pass `retries: 0` to send once, or a `sleeper` closure to
+control the waiting (tests do).
+
+A duplicate is not retried, because the entry is already in the log. What that means
+differs by version, and both are handled: **v1** answers `409` with a `Location` for the
+entry that is already there, so the client follows it and returns that entry — which is
+exactly the case a retry runs into when the first attempt reached the log but its answer
+did not come back. **v2** answers `409` with the entry's index in `x-log-index` and has no
+write-side endpoint to read it from, so the client reports the index and leaves fetching to
+the read path.
+
 ## Errors
 
 Everything thrown implements `K2gl\RekorClient\Exception\RekorClientException`:
