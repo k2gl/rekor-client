@@ -58,11 +58,11 @@ final class RekorClientTest extends TestCase
         fact((string) $captured?->getUri())->is(self::BASE_URL . '/api/v2/log/entries');
         fact($captured?->getHeaderLine('Content-Type'))->is('application/json');
 
-        $sent = json_decode((string) $captured?->getBody(), true);
-        fact($sent['hashedRekordRequestV002']['digest'])->is(base64_encode(str_repeat("\x11", 32)));
-        fact($sent['hashedRekordRequestV002']['signature']['content'])->is(base64_encode('raw-signature'));
-        fact($sent['hashedRekordRequestV002']['signature']['verifier']['keyDetails'])->is('PKIX_ECDSA_P256_SHA_256');
-        fact($sent['hashedRekordRequestV002']['signature']['verifier']['publicKey']['rawBytes'])->is(base64_encode('der-public-key'));
+        fact((string) $captured?->getBody())
+            ->jsonPath('hashedRekordRequestV002.digest', base64_encode(str_repeat("\x11", 32)))
+            ->jsonPath('hashedRekordRequestV002.signature.content', base64_encode('raw-signature'))
+            ->jsonPath('hashedRekordRequestV002.signature.verifier.keyDetails', 'PKIX_ECDSA_P256_SHA_256')
+            ->jsonPath('hashedRekordRequestV002.signature.verifier.publicKey.rawBytes', base64_encode('der-public-key'));
 
         // The parsed entry is a real bundle TransparencyLogEntry, ready to embed.
         fact($entry)->instanceOf(TransparencyLogEntry::class);
@@ -100,21 +100,17 @@ final class RekorClientTest extends TestCase
 
         $client->submitHashedRekord('d', 's', Verifier::certificate('leaf', KeyDetails::PKIX_ED25519));
 
-        $sent = json_decode((string) $captured?->getBody(), true);
-        fact($sent['hashedRekordRequestV002']['signature']['verifier']['x509Certificate']['rawBytes'])->is(base64_encode('leaf'));
-        fact(isset($sent['hashedRekordRequestV002']['signature']['verifier']['publicKey']))->false();
+        fact((string) $captured?->getBody())
+            ->jsonPath('hashedRekordRequestV002.signature.verifier.x509Certificate.rawBytes', base64_encode('leaf'))
+            ->notHasJsonPath('hashedRekordRequestV002.signature.verifier.publicKey');
     }
 
     public function testErrorStatusThrowsResponseException(): void
     {
         $client = $this->client(fn (): ResponseInterface => $this->response(409, '{"message":"entry already exists"}'));
 
-        try {
-            $client->submitHashedRekord('d', 's', Verifier::publicKey('k', KeyDetails::PKIX_ECDSA_P256_SHA_256));
-            self::fail('Expected a RekorResponseException.');
-        } catch (RekorResponseException $e) {
-            fact($e->statusCode)->is(409);
-        }
+        fact(fn () => $client->submitHashedRekord('d', 's', Verifier::publicKey('k', KeyDetails::PKIX_ECDSA_P256_SHA_256)))
+            ->throws(RekorResponseException::class, inspect: static fn (RekorResponseException $e) => fact($e->statusCode)->is(409));
     }
 
     public function testTransportErrorThrowsRequestException(): void
@@ -189,14 +185,16 @@ final class RekorClientTest extends TestCase
         // assert: v1 takes a proposed entry at its own path, hex digest and PEM key
         fact((string) $captured?->getUri())->is(self::BASE_URL . '/api/v1/log/entries');
 
-        $sent = json_decode((string) $captured?->getBody(), true);
-        fact($sent['kind'])->is('hashedrekord');
-        fact($sent['apiVersion'])->is('0.0.1');
-        fact($sent['spec']['data']['hash']['algorithm'])->is('sha256');
-        fact($sent['spec']['data']['hash']['value'])->is(bin2hex($digest));
-        fact($sent['spec']['signature']['content'])->is(base64_encode('raw-signature'));
-        fact(base64_decode($sent['spec']['signature']['publicKey']['content'], true))
-            ->is(Verifier::publicKey('der-public-key', KeyDetails::PKIX_ECDSA_P256_SHA_256)->pem());
+        fact((string) $captured?->getBody())
+            ->jsonPath('kind', 'hashedrekord')
+            ->jsonPath('apiVersion', '0.0.1')
+            ->jsonPath('spec.data.hash.algorithm', 'sha256')
+            ->jsonPath('spec.data.hash.value', bin2hex($digest))
+            ->jsonPath('spec.signature.content', base64_encode('raw-signature'))
+            ->jsonPath(
+                'spec.signature.publicKey.content',
+                base64_encode(Verifier::publicKey('der-public-key', KeyDetails::PKIX_ECDSA_P256_SHA_256)->pem()),
+            );
 
         // assert: a real public-instance entry parses into the bundle type
         fact($entry->kind)->is('hashedrekord');
@@ -207,8 +205,8 @@ final class RekorClientTest extends TestCase
         fact($entry->inclusionPromise)->notNull();
         fact($entry->inclusionProof?->treeSize)->is(117740831);
         fact($entry->inclusionProof?->hashes)->count(27);
-        fact(strlen($entry->inclusionProof?->rootHash ?? ''))->is(32);
-        fact(str_starts_with($entry->inclusionProof?->checkpoint ?? '', 'rekor.sigstore.dev - '))->true();
+        fact($entry->inclusionProof?->rootHash ?? '')->hasLength(32);
+        fact($entry->inclusionProof?->checkpoint ?? '')->startsWith('rekor.sigstore.dev - ');
     }
 
     public function testRekorV1RequestMatchesTheShapeTheLogCanonicalises(): void
@@ -301,8 +299,7 @@ final class RekorClientTest extends TestCase
         // assert
         $sent = json_decode((string) $captured?->getBody(), true);
         $pem = base64_decode($sent['spec']['signature']['publicKey']['content'], true);
-        fact(str_starts_with((string) $pem, "-----BEGIN CERTIFICATE-----\n"))->true();
-        fact(str_contains((string) $pem, base64_encode('leaf')))->true();
+        fact((string) $pem)->startsWith("-----BEGIN CERTIFICATE-----\n")->containsString(base64_encode('leaf'));
     }
 
     #[TestWith([31])]
@@ -358,8 +355,8 @@ final class RekorClientTest extends TestCase
         // assert
         fact($attempts)->is(3);
         fact($entry->logIndex)->is(735);
-        fact(count($this->slept))->is(2);
-        fact($this->slept[1] > $this->slept[0])->true();
+        fact($this->slept)->count(2);
+        fact($this->slept[1])->isGreaterThan($this->slept[0]);
     }
 
     public function testRetriesTheCancellationSeenOnTheRealLog(): void
@@ -419,7 +416,7 @@ final class RekorClientTest extends TestCase
         fact(fn () => $client->submitHashedRekord(str_repeat("\x11", 32), 'sig', Verifier::publicKey('k', KeyDetails::PKIX_ECDSA_P256_SHA_256)))
             ->throws(RekorResponseException::class);
         fact($attempts)->is(1);
-        fact($this->slept)->is([]);
+        fact($this->slept)->isEmptyArray();
     }
 
     public function testGivesUpAfterTheConfiguredNumberOfAttempts(): void
