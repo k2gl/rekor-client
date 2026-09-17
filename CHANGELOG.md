@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.3.0
+
+- **`LogReader` reads a Rekor v2 log** through its tlog-tiles API: `checkpoint()` returns the
+  log's head verified with the log's key (a `K2gl\SignedNote\Checkpoint`), and `entry()` /
+  `entries()` return `TransparencyLogEntry` values with inclusion proofs computed from the
+  hash tiles and checked against that checkpoint — the same value a submission returns, so
+  a duplicate `409` from v2 is no longer a dead end. Fail-closed: a checkpoint of another
+  log or under another key, a tile of the wrong size, a bundle with the wrong number of
+  entries, or tiles that do not reproduce the root are all errors. When the head tile moves
+  on between the checkpoint and the tiles, the reader takes a fresh checkpoint once.
+- Log ids follow the trusted root: the note key hash over origin and key for an Ed25519
+  log, SHA-256 of the DER key otherwise.
+- The test suite carries a recorded slice of `log2025-1.rekor.sigstore.dev` and checks the
+  Merkle arithmetic against the Certificate Transparency test tree.
+- Requires `k2gl/signed-note` ^1.1 for the checkpoint.
+
 ## 1.2.0
 
 - **Submissions are retried** when the log answers with a transport failure or one of the

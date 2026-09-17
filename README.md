@@ -10,7 +10,8 @@ Submit entries to a Rekor transparency log from PHP — both the original
 [v2](https://github.com/sigstore/rekor-tiles) (rekor-tiles) — and get back the
 transparency-log entry Rekor integrated, the same value
 [`k2gl/sigstore-bundle`](https://github.com/k2gl/sigstore-bundle) takes, so a signer goes
-**submit → add to bundle** with no glue in between.
+**submit → add to bundle** with no glue in between. And read a v2 log back: its signed
+checkpoint, and any entry with an inclusion proof computed from the log's hash tiles.
 
 Transport is any [PSR-18](https://www.php-fig.org/psr/psr-18/) HTTP client you supply
 (Guzzle, Symfony HttpClient, …). This package speaks the Rekor API; it owns no socket.
@@ -19,7 +20,8 @@ Transport is any [PSR-18](https://www.php-fig.org/psr/psr-18/) HTTP client you s
 
 - PHP 8.1+
 - A PSR-18 HTTP client and a PSR-17 factory (e.g. `nyholm/psr7` + `symfony/http-client`)
-- [`k2gl/sigstore-bundle`](https://github.com/k2gl/sigstore-bundle)
+- [`k2gl/sigstore-bundle`](https://github.com/k2gl/sigstore-bundle) and
+  [`k2gl/signed-note`](https://github.com/k2gl/signed-note) (checkpoints)
 
 ## Installation
 
@@ -78,8 +80,8 @@ algorithm, and it is read from the digest length).
 
 ### DSSE attestations
 
-Neither version has a DSSE entry type. Submit the DSSE **PAE** digest and the envelope
-signature as a hashedrekord — the entry Rekor returns is the one a DSSE bundle carries.
+This client submits hashedrekord entries. For a DSSE attestation, submit the **PAE** digest
+and the envelope signature — the entry Rekor returns is the one a DSSE bundle carries.
 
 ### Signing identity
 
@@ -101,8 +103,50 @@ differs by version, and both are handled: **v1** answers `409` with a `Location`
 entry that is already there, so the client follows it and returns that entry — which is
 exactly the case a retry runs into when the first attempt reached the log but its answer
 did not come back. **v2** answers `409` with the entry's index in `x-log-index` and has no
-write-side endpoint to read it from, so the client reports the index and leaves fetching to
-the read path.
+write-side endpoint to read it from, so the client reports the index; `LogReader::entry()`
+below fetches it from the read path.
+
+## Reading the log
+
+A Rekor v2 log is served as [tlog-tiles](https://c2sp.org/tlog-tiles): a signed checkpoint
+(the log's head), hash tiles 256 wide at every level of the Merkle tree, and entry bundles
+holding the entries themselves. `LogReader` puts those together into the same
+`TransparencyLogEntry` a submission returns — with an inclusion proof against the current
+checkpoint — so an entry can go into a bundle whether you submitted it or found it.
+
+```php
+use K2gl\RekorClient\LogReader;
+
+$reader = new LogReader(
+    httpClient:     $psr18Client,
+    requestFactory: $psr17Factory,
+    baseUrl:        'https://log2025-1.rekor.sigstore.dev',
+    origin:         'log2025-1.rekor.sigstore.dev',   // the checkpoint's first line
+    publicKeyDer:   $logPublicKeyDer,                 // tlogs[].publicKey.rawBytes in the trusted root
+);
+
+$checkpoint = $reader->checkpoint();      // K2gl\SignedNote\Checkpoint: origin, treeSize, rootHash
+$entry      = $reader->entry(114108965);  // TransparencyLogEntry with an inclusion proof
+$entries    = $reader->entries(from: 114108900, count: 100); // the same, in bulk
+```
+
+The reader takes the log's name and key — both from Sigstore's trusted root — and every read
+starts from a checkpoint verified with that key. A proof is computed from the tiles the
+entry's path runs through (a handful of requests, whatever the log's size) and checked to
+reproduce the checkpoint's root before the entry is handed out; a tile that does not fit
+the tree, a bundle with the wrong number of entries or a checkpoint of another log are
+errors, never a best effort. Entries are stamped with the log id the trusted root lists:
+for an Ed25519 log the note key hash over origin and key, otherwise SHA-256 of the DER key.
+
+A log keeps growing while you read it, so the partial tile at its head can be replaced by
+a wider one between the checkpoint and the tiles. The reader notices (the tile is gone),
+takes a fresh checkpoint and goes once more; `entries()` proves every entry of a call
+against one and the same checkpoint. Reading past the head is not an error for
+`entries()` (it returns what is there), while `entry()` insists on its index.
+
+The test suite reads a recorded slice of the public log — checkpoint, head bundle and the
+tiles of one proof, taken by `tests/fixtures/rekor-v2/record.php` — with the log key from the
+trusted root, and an in-memory log of 70 000 entries laid out the way a real one is.
 
 ## Errors
 
@@ -114,9 +158,9 @@ with the HTTP `statusCode`), and `InvalidArgumentException` (bad input).
 ## Scope
 
 This package covers **submission** (the write path a signer needs) against both log
-versions. Reading back entries and tiles (the C2SP tlog-tiles read API) is not implemented yet;
-verifying an entry already in a bundle is what
-[`k2gl/sigstore-verify`](https://github.com/k2gl/sigstore-verify) does.
+versions, and **reading** a v2 log through the tlog-tiles API. Reading a v1 log's REST API
+is not covered. Verifying an entry already in a bundle — identity, signature, timestamps —
+is what [`k2gl/sigstore-verify`](https://github.com/k2gl/sigstore-verify) does.
 
 ## Pull requests are always welcome
 [Collaborate with pull requests](https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/proposing-changes-to-your-work-with-pull-requests/creating-a-pull-request)

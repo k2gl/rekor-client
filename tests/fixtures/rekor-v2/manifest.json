@@ -1,0 +1,13 @@
+{
+    "origin": "log2025-1.rekor.sigstore.dev",
+    "publicKeyDer": "MCowBQYDK2VwAyEAt8rlp1knGwjfbcXAYPYAkn0XiLz1x8O4t0YkEhie244=",
+    "logIndex": 114108965,
+    "files": {
+        "/api/v2/checkpoint": "checkpoint.bin",
+        "/api/v2/tile/entries/x445/738.p/99": "tile_entries_x445_738.p_99.bin",
+        "/api/v2/tile/3/000.p/6": "tile_3_000.p_6.bin",
+        "/api/v2/tile/2/006.p/205": "tile_2_006.p_205.bin",
+        "/api/v2/tile/1/x001/741.p/42": "tile_1_x001_741.p_42.bin",
+        "/api/v2/tile/0/x445/738.p/99": "tile_0_x445_738.p_99.bin"
+    }
+}

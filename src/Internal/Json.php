@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace K2gl\RekorClient\Internal;
 
+use JsonException;
 use K2gl\RekorClient\Exception\RekorResponseException;
 
 /**
@@ -140,6 +141,29 @@ final class Json
         }
 
         return $out;
+    }
+
+    /**
+     * The kind and apiVersion an entry names in its canonical body — Rekor v1
+     * does not report them alongside the entry, and a tile holds only the body.
+     *
+     * @return array{0: string, 1: string}
+     */
+    public static function kindVersion(string $canonicalizedBody): array
+    {
+        try {
+            /** @var mixed $decoded */
+            $decoded = json_decode($canonicalizedBody, true, flags: JSON_THROW_ON_ERROR);
+        } catch (JsonException $e) {
+            throw new RekorResponseException('The Rekor entry body is not valid JSON: ' . $e->getMessage());
+        }
+
+        if (! is_array($decoded)) {
+            throw new RekorResponseException('The Rekor entry body is not a JSON object.');
+        }
+
+        /** @var array<string, mixed> $decoded */
+        return [self::string($decoded, 'kind'), self::string($decoded, 'apiVersion')];
     }
 
     private static function decodeHex(string $value): ?string
