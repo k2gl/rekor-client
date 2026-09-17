@@ -75,6 +75,29 @@ final class RekorClient
         };
     }
 
+    /**
+     * The entry at a log index, as a Rekor v1 log reports it — body, integrated
+     * time, signed entry timestamp and inclusion proof. A v2 log has no such
+     * endpoint on its write API; it is read through its tiles by {@see LogReader}.
+     */
+    public function entry(int $logIndex): TransparencyLogEntry
+    {
+        if ($logIndex < 0) {
+            throw new InvalidArgumentException('A log index must not be negative.');
+        }
+
+        if ($this->apiVersion !== RekorApiVersion::V1) {
+            throw new InvalidArgumentException('A Rekor v2 log is read through its tiles: use LogReader.');
+        }
+        $response = $this->http->get('/api/v1/log/entries?logIndex=' . $logIndex);
+
+        if ($response->getStatusCode() === 404) {
+            throw new RekorResponseException(sprintf('Log index %d is not in the log.', $logIndex), statusCode: 404);
+        }
+
+        return $this->parseV1Entry($this->decode($response));
+    }
+
     private function submitV2(string $digest, string $signature, Verifier $verifier): TransparencyLogEntry
     {
         $body = [

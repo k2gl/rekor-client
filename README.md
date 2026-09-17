@@ -148,6 +148,11 @@ The test suite reads a recorded slice of the public log — checkpoint, head bun
 tiles of one proof, taken by `tests/fixtures/rekor-v2/record.php` — with the log key from the
 trusted root, and an in-memory log of 70 000 entries laid out the way a real one is.
 
+A **v1** log answers for its entries itself: `RekorClient::entry($logIndex)` on a v1 client
+is `GET /api/v1/log/entries?logIndex=…`, and the entry comes back the way a submission does,
+inclusion promise and proof included. There is nothing to compute, and nothing verified here
+— that stays with `k2gl/sigstore-verify`.
+
 ## Errors
 
 Everything thrown implements `K2gl\RekorClient\Exception\RekorClientException`:
@@ -158,9 +163,9 @@ with the HTTP `statusCode`), and `InvalidArgumentException` (bad input).
 ## Scope
 
 This package covers **submission** (the write path a signer needs) against both log
-versions, and **reading** a v2 log through the tlog-tiles API. Reading a v1 log's REST API
-is not covered. Verifying an entry already in a bundle — identity, signature, timestamps —
-is what [`k2gl/sigstore-verify`](https://github.com/k2gl/sigstore-verify) does.
+versions, and **reading** entries back — a v2 log through the tlog-tiles API, a v1 log
+through its REST API. Verifying an entry already in a bundle — identity, signature,
+timestamps — is what [`k2gl/sigstore-verify`](https://github.com/k2gl/sigstore-verify) does.
 
 ## Pull requests are always welcome
 [Collaborate with pull requests](https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/proposing-changes-to-your-work-with-pull-requests/creating-a-pull-request)

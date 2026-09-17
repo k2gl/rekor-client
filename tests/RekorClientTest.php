@@ -532,6 +532,51 @@ final class RekorClientTest extends TestCase
     private array $slept = [];
 
     /** @param callable(RequestInterface): ResponseInterface $handler */
+    public function testReadsAV1EntryByIndex(): void
+    {
+        // arrange — the entry at index 100000000 of rekor.sigstore.dev, as the log served it
+        $captured = null;
+        $client = $this->client(function (RequestInterface $request) use (&$captured): ResponseInterface {
+            $captured = $request;
+
+            return $this->response(200, $this->fixture('rekor-v1-entry-by-index.json'));
+        }, RekorApiVersion::V1);
+
+        // act
+        $entry = $client->entry(100000000);
+
+        // assert
+        fact($captured?->getMethod())->is('GET');
+        fact((string) $captured?->getUri())->is(self::BASE_URL . '/api/v1/log/entries?logIndex=100000000');
+        fact($entry->logIndex)->is(100000000);
+        fact($entry->kind)->is('hashedrekord');
+        fact($entry->integratedTime)->notNull();
+        fact($entry->inclusionPromise)->notNull();
+        fact($entry->inclusionProof?->treeSize > 100000000)->true();
+    }
+
+    public function testAnIndexBeyondTheV1LogIsReported(): void
+    {
+        // arrange
+        $client = $this->client(fn (): ResponseInterface => $this->response(404, '{"code":404,"message":"entry not found"}'), RekorApiVersion::V1);
+
+        // act + assert
+        fact(static fn () => $client->entry(99999999999))->throws(
+            RekorResponseException::class,
+            inspect: static fn (RekorResponseException $e) => fact($e->statusCode)->is(404),
+        );
+    }
+
+    public function testAV2ClientPointsAtTheLogReaderForReads(): void
+    {
+        // arrange
+        $client = $this->client(fn (): ResponseInterface => $this->response(200, '{}'));
+
+        // act + assert
+        fact(static fn () => $client->entry(1))->throws(InvalidArgumentException::class);
+        fact(static fn () => $client->entry(-1))->throws(InvalidArgumentException::class);
+    }
+
     private function client(
         callable $handler,
         RekorApiVersion $apiVersion = RekorApiVersion::V2,

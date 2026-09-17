@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.4.0
+
+- `RekorClient::entry($logIndex)` reads an entry back from a **v1** log
+  (`GET /api/v1/log/entries?logIndex=…`), parsed exactly as a submission response is —
+  inclusion promise and proof included. On a v2 client it points at `LogReader`, since v2
+  has no such endpoint. A recorded response from rekor.sigstore.dev is the fixture.
+
 ## 1.3.0
 
 - **`LogReader` reads a Rekor v2 log** through its tlog-tiles API: `checkpoint()` returns the
