@@ -7,12 +7,11 @@ namespace K2gl\RekorClient;
 use Closure;
 use JsonException;
 use K2gl\RekorClient\Exception\InvalidArgumentException;
-use K2gl\RekorClient\Exception\RekorRequestException;
 use K2gl\RekorClient\Exception\RekorResponseException;
+use K2gl\RekorClient\Internal\Http;
 use K2gl\RekorClient\Internal\Json;
 use K2gl\SigstoreBundle\InclusionProof;
 use K2gl\SigstoreBundle\TransparencyLogEntry;
-use Psr\Http\Client\ClientExceptionInterface;
 use Psr\Http\Client\ClientInterface;
 use Psr\Http\Message\RequestFactoryInterface;
 use Psr\Http\Message\ResponseInterface;
@@ -34,7 +33,8 @@ use Psr\Http\Message\StreamFactoryInterface;
  *
  * Transport is any PSR-18 client the caller supplies; this package speaks the
  * Rekor API but owns no socket. The log's base URL is required (Sigstore
- * distributes it in the signing config; it is not hard-coded here).
+ * distributes it in the signing config; it is not hard-coded here). Reading
+ * entries back out of a v2 log is {@see LogReader}'s job.
  *
  * @see https://github.com/sigstore/rekor-tiles/blob/main/CLIENTS.md
  * @see https://github.com/sigstore/rekor/blob/main/openapi.yaml
@@ -42,45 +42,27 @@ use Psr\Http\Message\StreamFactoryInterface;
 final class RekorClient
 {
     /** Extra attempts after the first one. */
-    private const DEFAULT_RETRIES = 2;
+    private const DEFAULT_RETRIES = Http::DEFAULT_RETRIES;
 
-    /** Doubles per attempt, so 0.2s, 0.4s, 0.8s … before a cap. */
-    private const BACKOFF_MICROSECONDS = 200_000;
-
-    private const MAX_BACKOFF_MICROSECONDS = 5_000_000;
-
-    /** A log asking to be left alone for longer than this is not worth waiting for. */
-    private const MAX_RETRY_AFTER_SECONDS = 30;
-
-    /**
-     * Statuses worth trying again. A duplicate (409) is deliberately absent: the
-     * entry is already in the log, so a retry would only produce it again.
-     */
-    private const RETRYABLE_STATUSES = [408, 429, 499, 500, 502, 503, 504];
-
-    private readonly string $baseUrl;
-
-    /** @var Closure(int): mixed */
-    private readonly Closure $sleeper;
+    private readonly Http $http;
 
     public function __construct(
-        private readonly ClientInterface $httpClient,
-        private readonly RequestFactoryInterface $requestFactory,
-        private readonly StreamFactoryInterface $streamFactory,
+        ClientInterface $httpClient,
+        RequestFactoryInterface $requestFactory,
+        StreamFactoryInterface $streamFactory,
         string $baseUrl,
         private readonly RekorApiVersion $apiVersion = RekorApiVersion::V2,
-        private readonly int $retries = self::DEFAULT_RETRIES,
+        int $retries = self::DEFAULT_RETRIES,
         ?Closure $sleeper = null,
     ) {
-        $this->baseUrl = rtrim($baseUrl, '/');
-        $this->sleeper = $sleeper ?? usleep(...);
+        $this->http = new Http($httpClient, $requestFactory, $baseUrl, $streamFactory, $retries, $sleeper);
     }
 
     /**
      * Submit a hashedrekord entry (digest + signature + verifier) and return the
      * transparency-log entry Rekor integrated it as. For a DSSE attestation,
-     * pass the digest of the PAE and the envelope signature (neither version has
-     * a DSSE entry type here; the PAE goes in as a hashedrekord).
+     * pass the digest of the PAE and the envelope signature: this client submits
+     * hashedrekord entries, and that is what a DSSE bundle carries.
      *
      * @param string $digest    raw digest bytes the signature is over
      * @param string $signature raw signature bytes
@@ -105,7 +87,7 @@ final class RekorClient
             ],
         ];
 
-        $response = $this->send('/api/v2/log/entries', $body);
+        $response = $this->http->postJson('/api/v2/log/entries', $body);
 
         if ($response->getStatusCode() === 409) {
             // rekor-tiles reports a duplicate as AlreadyExists and names the entry
@@ -144,7 +126,7 @@ final class RekorClient
             ],
         ];
 
-        $response = $this->send('/api/v1/log/entries', $body);
+        $response = $this->http->postJson('/api/v1/log/entries', $body);
 
         // A duplicate is not a failure: the entry is in the log, and Rekor points
         // at it. This is also what a retry runs into when the first attempt
@@ -171,79 +153,6 @@ final class RekorClient
     }
 
     /**
-     * Send a request, trying again while the log answers with something that is
-     * worth another go — a transport failure, or one of the statuses a log uses
-     * to say "busy, come back". A 409 is returned to the caller rather than
-     * retried; what it means differs per version.
-     *
-     * @param array<string, mixed>|null $body
-     */
-    private function send(string $path, ?array $body, string $method = 'POST'): ResponseInterface
-    {
-        $request = $this->requestFactory->createRequest($method, $this->baseUrl . $path)
-            ->withHeader('Accept', 'application/json');
-
-        if ($body !== null) {
-            try {
-                $json = json_encode($body, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES);
-            } catch (JsonException $e) {
-                throw new RekorRequestException('Could not encode the Rekor request body: ' . $e->getMessage(), previous: $e);
-            }
-            $request = $request
-                ->withHeader('Content-Type', 'application/json')
-                ->withBody($this->streamFactory->createStream($json));
-        }
-        $attempts = max(1, $this->retries + 1);
-
-        for ($attempt = 1; ; $attempt++) {
-            try {
-                $response = $this->httpClient->sendRequest($request);
-            } catch (ClientExceptionInterface $e) {
-                if ($attempt >= $attempts) {
-                    throw new RekorRequestException('Rekor request failed: ' . $e->getMessage(), previous: $e);
-                }
-                $this->pause($attempt, null);
-
-                continue;
-            }
-
-            if ($attempt >= $attempts || ! in_array($response->getStatusCode(), self::RETRYABLE_STATUSES, true)) {
-                return $response;
-            }
-            $this->pause($attempt, $response);
-        }
-    }
-
-    /** Wait before the next attempt: as long as the log asked, else backing off. */
-    private function pause(int $attempt, ?ResponseInterface $response): void
-    {
-        $asked = $response === null ? null : self::retryAfterSeconds($response);
-
-        if ($asked !== null) {
-            ($this->sleeper)($asked * 1_000_000);
-
-            return;
-        }
-        $backoff = min(self::BACKOFF_MICROSECONDS << ($attempt - 1), self::MAX_BACKOFF_MICROSECONDS);
-
-        // Jitter, so several signers retrying at once do not march in step.
-        ($this->sleeper)($backoff + random_int(0, intdiv($backoff, 2)));
-    }
-
-    /** The Retry-After delay in seconds, when the log sent a usable one. */
-    private static function retryAfterSeconds(ResponseInterface $response): ?int
-    {
-        $header = trim($response->getHeaderLine('Retry-After'));
-
-        if ($header === '' || preg_match('/^\d+$/', $header) !== 1) {
-            return null;
-        }
-        $seconds = (int) $header;
-
-        return $seconds >= 0 && $seconds <= self::MAX_RETRY_AFTER_SECONDS ? $seconds : null;
-    }
-
-    /**
      * Rekor v1 answers a duplicate with 409 and a Location pointing at the entry
      * that is already there. Follow it.
      */
@@ -259,7 +168,7 @@ final class RekorClient
             );
         }
 
-        return $this->send('/api/v1/log/entries/' . $uuid, null, 'GET');
+        return $this->http->get('/api/v1/log/entries/' . $uuid);
     }
 
     /**
@@ -351,7 +260,7 @@ final class RekorClient
         /** @var array<string, mixed> $entry */
         $canonicalizedBody = Json::base64($entry, 'body');
         $verification = isset($entry['verification']) ? Json::object($entry, 'verification') : [];
-        [$kind, $version] = self::kindVersion($canonicalizedBody);
+        [$kind, $version] = Json::kindVersion($canonicalizedBody);
 
         return new TransparencyLogEntry(
             logIndex: Json::intString($entry, 'logIndex'),
@@ -365,29 +274,6 @@ final class RekorClient
                 : null,
             inclusionProof: $this->parseV1InclusionProof($verification),
         );
-    }
-
-    /**
-     * v1 does not report the entry kind alongside the entry — it is inside the
-     * canonical body it echoes back.
-     *
-     * @return array{0: string, 1: string}
-     */
-    private static function kindVersion(string $canonicalizedBody): array
-    {
-        try {
-            /** @var mixed $decoded */
-            $decoded = json_decode($canonicalizedBody, true, flags: JSON_THROW_ON_ERROR);
-        } catch (JsonException $e) {
-            throw new RekorResponseException('The Rekor entry body is not valid JSON: ' . $e->getMessage());
-        }
-
-        if (! is_array($decoded)) {
-            throw new RekorResponseException('The Rekor entry body is not a JSON object.');
-        }
-
-        /** @var array<string, mixed> $decoded */
-        return [Json::string($decoded, 'kind'), Json::string($decoded, 'apiVersion')];
     }
 
     /** @param array<string, mixed> $verification */

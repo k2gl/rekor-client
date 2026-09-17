@@ -32,6 +32,7 @@ use function K2gl\PHPUnitFluentAssertions\fact;
 #[CoversClass(Verifier::class)]
 #[CoversClass(KeyDetails::class)]
 #[CoversClass(\K2gl\RekorClient\Internal\Json::class)]
+#[CoversClass(\K2gl\RekorClient\Internal\Http::class)]
 #[CoversClass(RekorResponseException::class)]
 #[CoversClass(RekorRequestException::class)]
 final class RekorClientTest extends TestCase

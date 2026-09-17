@@ -1,6 +1,6 @@
 {
   "name": "k2gl/rekor-client",
-  "description": "A PSR-18 client for the Rekor transparency log (v1 and v2) — submit hashedrekord entries from PHP",
+  "description": "A PSR-18 client for the Rekor transparency log (v1 and v2) — submit hashedrekord entries and read a v2 log's tiles from PHP",
   "homepage": "https://github.com/k2gl/rekor-client",
   "type": "library",
   "license": "MIT",
@@ -11,6 +11,7 @@
     "tlog",
     "hashedrekord",
     "checkpoint",
+    "tlog-tiles",
     "supply-chain",
     "psr-18"
   ],
@@ -30,7 +31,8 @@
     "psr/http-client": "^1.0",
     "psr/http-factory": "^1.0",
     "psr/http-message": "^1.1|^2.0",
-    "k2gl/sigstore-bundle": "^1.0"
+    "k2gl/sigstore-bundle": "^1.0",
+    "k2gl/signed-note": "^1.1"
   },
   "require-dev": {
     "phpunit/phpunit": "^10|^11|^12",
